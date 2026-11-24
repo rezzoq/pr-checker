@@ -12,11 +12,13 @@ public final class ReviewWriter {
         StringBuilder report = new StringBuilder("# PR review\n");
         appendSection(report, "Проверки правил", result.ruleFindings());
         appendSection(report, "Замечания модели", result.modelFindings());
+        appendSection(report, "Ошибки проверки модели", result.chunkFailures());
         appendSection(report, "Пропущенные файлы (превышен лимит diff)", result.skippedFiles());
         if (result.ruleFindings().isEmpty()
                 && result.modelFindings().isEmpty()
+                && result.chunkFailures().isEmpty()
                 && result.skippedFiles().isEmpty()) {
-            report.append("\nЗамечаний нет.\n");
+            report.append("\nEVERYTHING CORRECT\n");
         }
         return report.toString();
     }
