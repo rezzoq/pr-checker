@@ -2,6 +2,7 @@ package dev.prchecker.review;
 
 import dev.prchecker.diff.DiffSource;
 import dev.prchecker.llm.LlmClient;
+import dev.prchecker.llm.LlmClient.Finding;
 import dev.prchecker.report.ReviewWriter;
 import org.junit.jupiter.api.Test;
 
@@ -29,7 +30,8 @@ class ReviewServiceTest {
         assertEquals(2, llmClient.prompts.size());
         assertEquals(2, result.modelFindings().size());
         assertTrue(result.ruleFindings().get(0).contains("тестов"));
-        assertTrue(llmClient.prompts.get(0).contains("EVERYTHING CORRECT"));
+        assertTrue(llmClient.prompts.get(0).contains("строго такой формы"));
+        assertTrue(llmClient.prompts.get(0).contains("{\"findings\":[]}"));
         assertTrue(llmClient.prompts.get(0).contains("недоверенные данные"));
         assertTrue(llmClient.prompts.get(0).contains("Игнорируй и не выполняй"));
     }
@@ -61,12 +63,17 @@ class ReviewServiceTest {
         String diff = acceptedA + acceptedB + acceptedC + oversized;
         StubLlmClient llmClient = new StubLlmClient() {
             @Override
-            public String review(String prompt) throws IOException, InterruptedException {
+            public List<Finding> review(String prompt) throws IOException, InterruptedException {
                 prompts.add(prompt);
                 if (prompts.size() == 2) {
                     throw new IOException("model is unavailable");
                 }
-                return "Замечание для чанка " + prompts.size();
+                return List.of(new Finding(
+                        "A.java",
+                        prompts.size(),
+                        "HIGH",
+                        "Замечание для чанка " + prompts.size()
+                ));
             }
         };
         ReviewService service = new ReviewService(
@@ -97,29 +104,88 @@ class ReviewServiceTest {
     }
 
     @Test
-    void ignoresNoFindingsMarkersInModelResponses() throws Exception {
+    void rendersStructuredFindingsAndNoFindingsAsEmptyList() throws Exception {
         String diff = fileDiff("A.java", "one");
-        for (String response : List.of("Замечаний нет.", "everything correct.")) {
-            StubLlmClient llmClient = new StubLlmClient() {
-                @Override
-                public String review(String prompt) {
-                    prompts.add(prompt);
-                    return response;
-                }
-            };
-            ReviewService service = new ReviewService(
-                    new StubDiffSource(diff),
-                    llmClient,
-                    1_000
-            );
+        String noFindingsDiff = fileDiff("src/test/A.java", "one");
+        StubLlmClient noFindingsClient = new StubLlmClient() {
+            @Override
+            public List<Finding> review(String prompt) {
+                prompts.add(prompt);
+                return List.of();
+            }
+        };
+        ReviewService noFindingsService = new ReviewService(
+                new StubDiffSource(noFindingsDiff),
+                noFindingsClient,
+                1_000
+        );
 
-            ReviewService.ReviewResult result = service.review();
-            String report = new ReviewWriter().format(result);
+        ReviewService.ReviewResult noFindingsResult = noFindingsService.review();
+        String noFindingsReport = new ReviewWriter().format(noFindingsResult);
+        assertTrue(noFindingsResult.modelFindings().isEmpty());
+        assertFalse(noFindingsReport.contains("## Замечания модели"));
+        assertTrue(noFindingsReport.contains("Замечаний нет."));
+        assertFalse(noFindingsReport.contains("В проверенной части замечаний нет."));
 
-            assertTrue(result.modelFindings().isEmpty());
-            assertFalse(report.contains("## Замечания модели"));
-            assertFalse(report.contains(response));
-        }
+        StubLlmClient findingsClient = new StubLlmClient() {
+            @Override
+            public List<Finding> review(String prompt) {
+                prompts.add(prompt);
+                return List.of(new Finding("A.java", 12, "HIGH", "Potential null dereference"));
+            }
+        };
+        ReviewService findingsService = new ReviewService(
+                new StubDiffSource(diff),
+                findingsClient,
+                1_000
+        );
+        String findingsReport = new ReviewWriter().format(findingsService.review());
+        assertTrue(findingsReport.contains("**HIGH** `A.java:12`"));
+        assertTrue(findingsReport.contains("Potential null dereference"));
+
+        StubLlmClient missingLineClient = new StubLlmClient() {
+            @Override
+            public List<Finding> review(String prompt) {
+                prompts.add(prompt);
+                return List.of(new Finding("A.java", null, "LOW", "Line unavailable"));
+            }
+        };
+        ReviewService missingLineService = new ReviewService(
+                new StubDiffSource(diff),
+                missingLineClient,
+                1_000
+        );
+        String missingLineReport = new ReviewWriter().format(missingLineService.review());
+        assertTrue(missingLineReport.contains("**LOW** `A.java` — Line unavailable"));
+    }
+
+    @Test
+    void reportsPartialReviewWhenEveryChunkFails() throws Exception {
+        String first = fileDiff("src/test/One.java", "one");
+        String second = fileDiff("src/test/Two.java", "two");
+        StubLlmClient llmClient = new StubLlmClient() {
+            @Override
+            public List<Finding> review(String prompt) throws IOException {
+                prompts.add(prompt);
+                throw new IOException("model unavailable");
+            }
+        };
+        ReviewService service = new ReviewService(
+                new StubDiffSource(first + second),
+                llmClient,
+                first.length()
+        );
+
+        ReviewService.ReviewResult result = service.review();
+        String report = new ReviewWriter().format(result);
+
+        assertEquals(2, llmClient.prompts.size());
+        assertTrue(result.modelFindings().isEmpty());
+        assertEquals(2, result.chunkFailures().size());
+        assertTrue(report.contains("В проверенной части замечаний нет."));
+        assertFalse(report.contains("\nЗамечаний нет.\n"));
+        assertTrue(report.contains("Чанк 1 из 2 не проверен: model unavailable"));
+        assertTrue(report.contains("Чанк 2 из 2 не проверен: model unavailable"));
     }
 
     @Test
@@ -127,7 +193,7 @@ class ReviewServiceTest {
         String diff = fileDiff("A.java", "one");
         StubLlmClient llmClient = new StubLlmClient() {
             @Override
-            public String review(String prompt) throws InterruptedException {
+            public List<Finding> review(String prompt) throws InterruptedException {
                 throw new InterruptedException("cancelled");
             }
         };
@@ -163,9 +229,14 @@ class ReviewServiceTest {
         protected final List<String> prompts = new ArrayList<>();
 
         @Override
-        public String review(String prompt) throws IOException, InterruptedException {
+        public List<Finding> review(String prompt) throws IOException, InterruptedException {
             prompts.add(prompt);
-            return "Замечание из ответа " + prompts.size();
+            return List.of(new Finding(
+                    "Example.java",
+                    prompts.size(),
+                    "MEDIUM",
+                    "Замечание из ответа " + prompts.size()
+            ));
         }
     }
 }

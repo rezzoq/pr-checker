@@ -1,7 +1,7 @@
 package dev.prchecker;
 
 import dev.prchecker.diff.GitDiffSource;
-import dev.prchecker.llm.OllamaClient;
+import dev.prchecker.llm.LlmClientFactory;
 import dev.prchecker.report.ReviewWriter;
 import dev.prchecker.review.DiffSplitter;
 import dev.prchecker.review.ReviewService;
@@ -28,7 +28,7 @@ public final class Main {
             int maxChunkChars = maxChunkCharsFromEnvironment();
             var service = new ReviewService(
                     new GitDiffSource(baseRef),
-                    new OllamaClient(),
+                    LlmClientFactory.createFromEnvironment(),
                     maxChunkChars
             );
             String report = new ReviewWriter().format(service.review());

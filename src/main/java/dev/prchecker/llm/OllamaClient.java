@@ -17,6 +17,7 @@ public final class OllamaClient implements LlmClient {
 
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
+    private final LlmFindingParser findingParser;
     private final URI endpoint;
     private final String model;
 
@@ -40,13 +41,15 @@ public final class OllamaClient implements LlmClient {
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
         this.objectMapper = new ObjectMapper();
+        this.findingParser = new LlmFindingParser();
     }
 
     @Override
-    public String review(String prompt) throws IOException, InterruptedException {
+    public java.util.List<Finding> review(String prompt) throws IOException, InterruptedException {
         ObjectNode requestBody = objectMapper.createObjectNode();
         requestBody.put("model", model);
         requestBody.put("stream", false);
+        requestBody.put("format", "json");
         ObjectNode message = requestBody.putArray("messages").addObject();
         message.put("role", "user");
         message.put("content", prompt);
@@ -71,6 +74,6 @@ public final class OllamaClient implements LlmClient {
         if (!content.isTextual()) {
             throw new IOException("Ollama response did not contain message.content");
         }
-        return content.asText();
+        return findingParser.parse(content.asText());
     }
 }
